@@ -4,6 +4,7 @@ import time
 import RPi.GPIO as GPIO
 from picamera2 import Picamera2
 
+
 # Configuration
 SAFETY_DISTANCE_THRESHOLD = 200  # Adjust based on your setup (in pixels)
 MACHINE_RELAY_PIN = 17  # GPIO pin connected to machine control relay

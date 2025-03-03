@@ -4,12 +4,11 @@ import time
 import RPi.GPIO as GPIO
 from picamera2 import Picamera2
 
-
 # Configuration
 SAFETY_DISTANCE_THRESHOLD = 200  # Adjust based on your setup (in pixels)
 MACHINE_RELAY_PIN = 17  # GPIO pin connected to machine control relay
-CAMERA_RESOLUTION = (1280, 720)
-FPS = 60
+CAMERA_RESOLUTION = (640, 480)
+FPS = 10
 
 # Initialize GPIO
 GPIO.setmode(GPIO.BCM)
@@ -29,6 +28,15 @@ time.sleep(2)
 grid_locked = False
 locked_grid_area = None
 
+def create_machine_grid(image_shape):
+    """Define machine area based on frame dimensions."""
+    height, width = image_shape[0], image_shape[1]
+    
+    # Define machine area (adjust these coordinates for your setup)
+    machine_top_left = (int(width * 0.25), int(height * 0.25))
+    machine_bottom_right = (int(width * 0.75), int(height * 0.75))
+    
+    return machine_top_left, machine_bottom_right
 
 def detect_black_grid_lines(frame):
     """

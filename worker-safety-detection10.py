@@ -40,8 +40,8 @@ def generate_grid():
         x2, y2 = grid_points[1]
         x_start, x_end = sorted([x1, x2])
         y_start, y_end = sorted([y1, y2])
-        for x in range(x_start, x_end, grid_size):
-            for y in range(y_start, y_end, grid_size):
+        for x in range(x_start, x_end - grid_size + 1, grid_size):
+            for y in range(y_start, y_end - grid_size + 1, grid_size):
                 grid_cells.append((x, y))
 
 def select_grid_or_color(event, x, y, flags, param):
@@ -60,6 +60,7 @@ def select_grid_or_color(event, x, y, flags, param):
             grid_points.append((x, y))
             print(f"Grid point selected: {x}, {y}")
         if len(grid_points) == 2:
+            freeze_frame = None
             generate_grid()
             print("Grid fully defined. Press 'l' to lock it.")
 
@@ -93,8 +94,18 @@ def highlight_grid_area(frame, positions):
         for x, y in grid_cells:
             if x <= cx < x + grid_size and y <= cy < y + grid_size:
                 if (x, y) not in highlighted_cells:
-                    cv2.rectangle(frame, (x, y), (x + grid_size, y + grid_size), (0, 0, 255), 2)
+                    cv2.rectangle(frame, (x, y), (x + grid_size, y + grid_size), (0, 255, 0), 2)
                     highlighted_cells.add((x, y))
+                break
+
+def check_machine_warning(frame, machine_positions, worker_positions):
+    for wx, wy in worker_positions:
+        worker_grid_x = wx // grid_size * grid_size
+        worker_grid_y = wy // grid_size * grid_size
+        warning_area = [(worker_grid_x + dx, worker_grid_y + dy) for dx in (-grid_size, 0, grid_size) for dy in (-grid_size, 0, grid_size)]
+        for mx, my in machine_positions:
+            if any(x <= mx < x + grid_size and y <= my < y + grid_size for x, y in warning_area):
+                cv2.putText(frame, 'WARNING!', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 break
 
 try:
@@ -118,33 +129,18 @@ try:
         worker_contours = detect_objects(display_frame, worker_color)
         machine_contours = detect_objects(display_frame, machine_color)
         
-        worker_positions = []
-        for contour in worker_contours:
-            M = cv2.moments(contour)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                worker_positions.append((cx, cy))
+        worker_positions = [(int(cv2.moments(contour)["m10"] / cv2.moments(contour)["m00"]), int(cv2.moments(contour)["m01"] / cv2.moments(contour)["m00"])) for contour in worker_contours if cv2.moments(contour)["m00"] != 0]
+        machine_positions = [(int(cv2.moments(contour)["m10"] / cv2.moments(contour)["m00"]), int(cv2.moments(contour)["m01"] / cv2.moments(contour)["m00"])) for contour in machine_contours if cv2.moments(contour)["m00"] != 0]
         
         highlight_grid_area(display_frame, worker_positions)
-        
-        for contour in machine_contours:
-            cv2.drawContours(display_frame, [contour], -1, (255, 0, 0), 2)
+        check_machine_warning(display_frame, machine_positions, worker_positions)
         
         cv2.imshow('Worker Safety Detection', display_frame)
-        
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('l') and len(grid_points) == 2:
-            grid_locked = True
-            print("Grid locked!")
-        elif key == ord('q'):
+        if key == ord('q'):
             break
-        elif key == ord('c'):
+        elif key == ord('c') or key == ord('m'):
             freeze_frame = frame.copy()
-            print("Frame frozen. Click on a worker to select color.")
-        elif key == ord('m'):
-            freeze_frame = frame.copy()
-            print("Frame frozen. Click on the machine to select color.")
         
         time.sleep(1 / FPS)
 

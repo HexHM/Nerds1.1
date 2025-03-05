@@ -5,17 +5,15 @@ import RPi.GPIO as GPIO
 from picamera2 import Picamera2
 
 # Configuration
-SAFETY_DISTANCE_THRESHOLD = 200  # Adjust based on your setup (in pixels)
-WORKER_COLOR_LOWER = np.array([0, 100, 100])  # HSV lower bound for worker identification (red)
-WORKER_COLOR_UPPER = np.array([10, 255, 255])  # HSV upper bound for worker identification (red)
-MACHINE_RELAY_PIN = 17  # GPIO pin connected to machine control relay
-CAMERA_RESOLUTION = (640, 480)
-FPS = 10
+SAFETY_DISTANCE_THRESHOLD = 200  # Adjust as per your safety requirements
+MACHINE_RELAY_PIN = 17
+CAMERA_RESOLUTION = (1280, 720)  # You can change this to your preference
+FPS = 60
 
 # Initialize GPIO
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(MACHINE_RELAY_PIN, GPIO.OUT)
-GPIO.output(MACHINE_RELAY_PIN, GPIO.HIGH)  # Machine enabled by default
+GPIO.output(MACHINE_RELAY_PIN, GPIO.HIGH)
 
 # Initialize camera
 picam2 = Picamera2()
@@ -23,157 +21,143 @@ config = picam2.create_preview_configuration(main={"size": CAMERA_RESOLUTION})
 picam2.configure(config)
 picam2.start()
 
-# Allow camera to warm up
 time.sleep(2)
 
-# Create a checkerboard grid for machine work area
-def create_machine_grid(image_shape):
-    height, width = image_shape[0], image_shape[1]
-    
-    # Define machine area (adjust these coordinates for your setup)
-    machine_top_left = (int(width * 0.25), int(height * 0.25))
-    machine_bottom_right = (int(width * 0.75), int(height * 0.75))
-    
-    return machine_top_left, machine_bottom_right
+# Global variables for grid and color tracking
+grid_points = []
+grid_size = 60  # Default grid size
+worker_color = None
+machine_color = None
+freeze_frame = None
+grid_locked = False
 
-def is_worker_too_close(worker_contours, machine_area):
-    machine_top_left, machine_bottom_right = machine_area
-    machine_center = (
-        (machine_top_left[0] + machine_bottom_right[0]) // 2,
-        (machine_top_left[1] + machine_bottom_right[1]) // 2
-    )
-    
-    for contour in worker_contours:
-        # Get center of worker contour
-        M = cv2.moments(contour)
-        if M["m00"] == 0:
-            continue
-            
-        worker_x = int(M["m10"] / M["m00"])
-        worker_y = int(M["m01"] / M["m00"])
-        
-        # Calculate distance from worker to machine center
-        distance = np.sqrt((worker_x - machine_center[0])**2 + (worker_y - machine_center[1])**2)
-        
-        # Debug information
-        print(f"Worker detected at ({worker_x}, {worker_y}), distance: {distance:.2f} pixels")
-        
-        if distance < SAFETY_DISTANCE_THRESHOLD:
-            return True
-    
-    return False
+# Mouse callback function to select grid corners, worker color, or machine color
+def select_grid_or_color(event, x, y, flags, param):
+    global grid_points, worker_color, machine_color, freeze_frame
+    if event == cv2.EVENT_LBUTTONDOWN:
+        if freeze_frame is not None:
+            hsv_frame = cv2.cvtColor(freeze_frame, cv2.COLOR_BGR2HSV)
+            if worker_color is None:
+                worker_color = hsv_frame[y, x]
+                print(f"Worker color selected: {worker_color}")
+            elif machine_color is None:
+                machine_color = hsv_frame[y, x]
+                print(f"Machine color selected: {machine_color}")
+            freeze_frame = None
+        elif not grid_locked and len(grid_points) < 2:
+            grid_points.append((x, y))
+            print(f"Grid point selected: {x}, {y}")
+        if len(grid_points) == 2:
+            print("Grid fully defined. Press 'l' to lock it.")
 
-def detect_workers(frame):
-    # Convert to HSV for better color detection
+cv2.namedWindow('Worker Safety Detection')
+cv2.setMouseCallback('Worker Safety Detection', select_grid_or_color)
+
+# Trackbar callback function
+def update_grid_size(val):
+    global grid_size
+    grid_size = max(10, val)  # Ensure grid size is at least 10 pixels
+
+cv2.createTrackbar('Grid Size', 'Worker Safety Detection', 50, 200, update_grid_size)
+
+# Function to detect objects based on color
+def detect_objects(frame, target_hsv_color):
+    if target_hsv_color is None:
+        return []
+    lower_bound = np.array([target_hsv_color[0] - 10, 100, 100])
+    upper_bound = np.array([target_hsv_color[0] + 10, 255, 255])
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    
-    # Create mask for worker color
-    mask = cv2.inRange(hsv, WORKER_COLOR_LOWER, WORKER_COLOR_UPPER)
-    
-    # Apply morphological operations to clean up the mask
+    mask = cv2.inRange(hsv, lower_bound, upper_bound)
     kernel = np.ones((5, 5), np.uint8)
     mask = cv2.erode(mask, kernel, iterations=1)
     mask = cv2.dilate(mask, kernel, iterations=2)
-    
-    # Find contours
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Filter out small contours (noise)
-    worker_contours = [contour for contour in contours if cv2.contourArea(contour) > 100]
-    
-    return worker_contours
+    return [contour for contour in contours if cv2.contourArea(contour) > 100]
 
-def draw_results(frame, worker_contours, machine_area, machine_enabled):
-    # Draw machine area
-    machine_top_left, machine_bottom_right = machine_area
-    color = (0, 255, 0) if machine_enabled else (0, 0, 255)  # Green if enabled, red if disabled
-    cv2.rectangle(frame, machine_top_left, machine_bottom_right, color, 2)
-    
-    # Draw grid lines within machine area
-    grid_step = 20
-    for x in range(machine_top_left[0], machine_bottom_right[0], grid_step):
-        cv2.line(frame, (x, machine_top_left[1]), (x, machine_bottom_right[1]), color, 1)
-    
-    for y in range(machine_top_left[1], machine_bottom_right[1], grid_step):
-        cv2.line(frame, (machine_top_left[0], y), (machine_bottom_right[0], y), color, 1)
-    
-    # Draw safety zone
-    machine_center = (
-        (machine_top_left[0] + machine_bottom_right[0]) // 2,
-        (machine_top_left[1] + machine_bottom_right[1]) // 2
-    )
-    cv2.circle(frame, machine_center, SAFETY_DISTANCE_THRESHOLD, (0, 255, 255), 2)
-    
-    # Draw detected workers
-    for contour in worker_contours:
-        cv2.drawContours(frame, [contour], -1, (0, 0, 255), 2)
-        
-        # Calculate and display center of contour
-        M = cv2.moments(contour)
-        if M["m00"] != 0:
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-            cv2.circle(frame, (cx, cy), 5, (255, 0, 255), -1)
-    
-    # Add status text
-    status = "SAFE: Machine ENABLED" if machine_enabled else "ALERT: Worker TOO CLOSE - Machine DISABLED"
-    color = (0, 255, 0) if machine_enabled else (0, 0, 255)
-    cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+# Function to highlight a 5x5 grid area centered around the worker
+def highlight_warning_area(frame, position):
+    x, y = position
+    warning_area_size = grid_size * 5
+    top_left_x = x - warning_area_size // 2
+    top_left_y = y - warning_area_size // 2
+    bottom_right_x = top_left_x + warning_area_size
+    bottom_right_y = top_left_y + warning_area_size
 
-    return frame
+    cv2.rectangle(frame, (top_left_x, top_left_y), (bottom_right_x, bottom_right_y), (0, 0, 255), 2)  # Red warning box
 
-def control_machine(enable):
-    if enable:
-        GPIO.output(MACHINE_RELAY_PIN, GPIO.HIGH)
-        print("Machine ENABLED")
-    else:
-        GPIO.output(MACHINE_RELAY_PIN, GPIO.LOW)
-        print("Machine DISABLED - Worker too close!")
+# Function to check if a machine is too close to a worker (based on distance)
+def check_machine_warning(frame, machine_positions, worker_positions):
+    for wx, wy in worker_positions:
+        worker_grid_x = (wx // grid_size) * grid_size
+        worker_grid_y = (wy // grid_size) * grid_size
+        warning_area = [(worker_grid_x + dx, worker_grid_y + dy) for dx in range(-2 * grid_size, 3 * grid_size, grid_size) for dy in range(-2 * grid_size, 3 * grid_size, grid_size)]
+        for x, y in warning_area:
+            cv2.rectangle(frame, (x, y), (x + grid_size, y + grid_size), (0, 0, 255), 2)
+        for mx, my in machine_positions:
+            if any(x <= mx < x + grid_size and y <= my < y + grid_size for x, y in warning_area):
+                cv2.putText(frame, 'WARNING!', (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                GPIO.output(MACHINE_RELAY_PIN, GPIO.LOW)  # Trigger machine off
+                return
+    GPIO.output(MACHINE_RELAY_PIN, GPIO.HIGH)
 
+# Main loop
 try:
-    last_machine_state = True
-    
     while True:
-        # Capture frame
         frame = picam2.capture_array()
+        frame = cv2.flip(frame, -1)
         
-        # Define machine area based on frame dimensions
-        machine_area = create_machine_grid(frame.shape)
+        if freeze_frame is not None:
+            display_frame = freeze_frame.copy()
+        else:
+            display_frame = frame.copy()
         
-        # Detect workers based on color
-        worker_contours = detect_workers(frame)
+        if len(grid_points) == 2:
+            x1, y1 = grid_points[0]
+            x2, y2 = grid_points[1]
+            x_start, x_end = sorted([x1, x2])
+            y_start, y_end = sorted([y1, y2])
+
+            for x in range(x_start, x_end - grid_size + 1, grid_size):
+                for y in range(y_start, y_end - grid_size + 1, grid_size):
+                    cv2.rectangle(display_frame, (x, y), (x + grid_size, y + grid_size), (255, 255, 255), 1)
         
-        # Check if any worker is too close
-        worker_too_close = is_worker_too_close(worker_contours, machine_area)
+        worker_contours = detect_objects(display_frame, worker_color)
+        machine_contours = detect_objects(display_frame, machine_color)
         
-        # Control the machine
-        machine_enabled = not worker_too_close
-        if machine_enabled != last_machine_state:
-            control_machine(machine_enabled)
-            last_machine_state = machine_enabled
+        worker_positions = [(int(cv2.moments(contour)["m10"] / cv2.moments(contour)["m00"]), int(cv2.moments(contour)["m01"] / cv2.moments(contour)["m00"])) for contour in worker_contours if cv2.moments(contour)["m00"] != 0]
+        machine_positions = [(int(cv2.moments(contour)["m10"] / cv2.moments(contour)["m00"]), int(cv2.moments(contour)["m01"] / cv2.moments(contour)["m00"])) for contour in machine_contours if cv2.moments(contour)["m00"] != 0]
+
+        # Highlight worker and machine positions
+        for wx, wy in worker_positions:
+            cv2.drawContours(display_frame, [worker_contours[worker_positions.index((wx, wy))]], -1, (0, 255, 0), 2)  # Green for worker
+            highlight_warning_area(display_frame, (wx, wy))  # Draw warning area around worker
         
-        # Draw results on frame
-        output_frame = draw_results(frame, worker_contours, machine_area, machine_enabled)
+        for mx, my in machine_positions:
+            cv2.drawContours(display_frame, [machine_contours[machine_positions.index((mx, my))]], -1, (255, 0, 0), 2)  # Blue for machine
         
-        # Display the resulting frame
-        cv2.imshow('Worker Safety Detection', output_frame)
+        # Check for warning (worker too close to machine)
+        check_machine_warning(display_frame, machine_positions, worker_positions)
         
-        # Save frame with timestamp if a worker is too close (for logging purposes)
-        if worker_too_close:
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            cv2.imwrite(f"safety_alert_{timestamp}.jpg", output_frame)
+        cv2.imshow('Worker Safety Detection', display_frame)
         
-        # Break the loop if 'q' is pressed
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('l') and len(grid_points) == 2:
+            grid_locked = True
+            print("Grid locked!")
+        elif key == ord('q'):
             break
-            
-        # Maintain frame rate
-        time.sleep(1/FPS)
+        elif key == ord('c'):
+            freeze_frame = frame.copy()
+            print("Frame frozen. Click on a worker to select color.")
+        elif key == ord('m'):
+            freeze_frame = frame.copy()
+            print("Frame frozen. Click on the machine to select color.")
         
+        time.sleep(1 / FPS)
+
 except KeyboardInterrupt:
     print("Program terminated by user")
 finally:
-    # Clean up
     GPIO.cleanup()
     cv2.destroyAllWindows()
     picam2.stop()
